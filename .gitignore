@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*.before-fix
+backups/
+.env
+.venv/
+venv/

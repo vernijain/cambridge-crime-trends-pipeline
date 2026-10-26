@@ -1,0 +1,32 @@
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: crime_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: crime_db
+      POSTGRES_USER: crime_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crime_user -d crime_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: crime_metabase
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
