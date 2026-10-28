@@ -1,6 +1,8 @@
 from prefect import flow, task
 from prefect.client.schemas.schedules import CronSchedule
+from dotenv import load_dotenv
 
+load_dotenv()
 from etl import fetch_records, transform_records, load_records
 
 

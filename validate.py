@@ -1,6 +1,9 @@
 import requests
 import psycopg
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 API_URL = "https://data.cambridgema.gov/resource/3gki-wyrb.json"
 
