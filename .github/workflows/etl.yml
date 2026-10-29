@@ -1,4 +1,4 @@
-```yaml
+
 name: Cambridge Crime ETL
 
 on:
@@ -53,4 +53,4 @@ jobs:
 
       - name: Run Cambridge Crime ETL
         run: python -u etl.py
-```
+
