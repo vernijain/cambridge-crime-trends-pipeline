@@ -1,4 +1,4 @@
-
+```yaml
 name: Cambridge Crime ETL
 
 on:
@@ -29,10 +29,28 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies and run ETL
+      - name: Verify requirements file
+        run: |
+          python --version
+          python -m pip --version
+          cat requirements.txt
+
+      - name: Install Psycopg
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
           python -m pip install --no-cache-dir "psycopg[binary]"
-          python -c "import sys, psycopg; print('Python:', sys.executable); print('Psycopg:', psycopg.__version__)"
-          python -u etl.py
+          python -m pip show psycopg
+
+      - name: Verify Psycopg import
+        run: |
+          python -c "import sys, psycopg; print('Python:', sys.executable); print('Psycopg version:', psycopg.__version__)"
+
+      - name: Install remaining requirements
+        run: python -m pip install -r requirements.txt
+
+      - name: Verify Psycopg again
+        run: python -c "import psycopg; print('Psycopg is available')"
+
+      - name: Run Cambridge Crime ETL
+        run: python -u etl.py
+```
