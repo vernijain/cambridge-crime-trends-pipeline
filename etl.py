@@ -34,7 +34,7 @@ API_TIMEOUT = 30
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", "5433")),
+    "port": int(os.getenv("DB_PORT") or "5433"),
     "dbname": os.getenv("DB_NAME", "crime_db"),
     "user": os.getenv("DB_USER", "crime_user"),
     "password": os.getenv("DB_PASSWORD", os.getenv("POSTGRES_PASSWORD")),
@@ -339,7 +339,10 @@ def load_records(records):
         "Connecting to PostgreSQL..."
     )
 
-    with psycopg.connect(**DB_CONFIG) as conn:
+    with psycopg.connect(
+    **DB_CONFIG,
+    sslmode="require" if os.getenv("DB_HOST", "localhost") != "localhost" else "prefer"
+    ) as conn:
 
         with conn.cursor() as cur:
 
