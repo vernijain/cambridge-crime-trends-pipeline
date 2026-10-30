@@ -1,12 +1,18 @@
 import logging
 import os
-from datetime import datetime
-from dotenv import load_dotenv
-
-load_dotenv()
+from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 import psycopg
 import requests
+from dotenv import load_dotenv
+
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
+load_dotenv()
 
 
 # ============================================================
@@ -27,18 +33,10 @@ logger = logging.getLogger(__name__)
 
 API_URL = "https://data.cambridgema.gov/resource/3gki-wyrb.json"
 
-# Maximum number of records requested per API query.
+# Maximum records requested per API query.
 API_LIMIT = 5000
 
 API_TIMEOUT = 30
-
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT") or "5433"),
-    "dbname": os.getenv("DB_NAME", "crime_db"),
-    "user": os.getenv("DB_USER", "crime_user"),
-    "password": os.getenv("DB_PASSWORD", os.getenv("POSTGRES_PASSWORD")),
-}
 
 
 # ============================================================
@@ -47,8 +45,10 @@ DB_CONFIG = {
 
 def fetch_records():
     """
-    Fetch all Cambridge Police API records in batches using pagination.
-    Merge and deduplicate records by API incident ID.
+    Fetch Cambridge Police API records in batches.
+
+    Records are deduplicated by API incident ID.
+    When duplicate IDs exist, prefer the newest source update.
     """
 
     combined = {}
@@ -77,6 +77,7 @@ def fetch_records():
                 params=page_params,
                 timeout=API_TIMEOUT,
             )
+
             response.raise_for_status()
 
             batch = response.json()
@@ -86,7 +87,10 @@ def fetch_records():
                     "Unexpected API response: expected a list."
                 )
 
-            logger.info("Received %s records.", len(batch))
+            logger.info(
+                "Received %s records.",
+                len(batch),
+            )
 
             if not batch:
                 break
@@ -94,21 +98,27 @@ def fetch_records():
             for record in batch:
                 incident_id = record.get("id")
 
-                if incident_id is None or str(incident_id).strip() == "":
+                if (
+                    incident_id is None
+                    or str(incident_id).strip() == ""
+                ):
                     logger.warning(
                         "Skipping API record without an incident ID."
                     )
                     continue
 
                 incident_id = str(incident_id)
+
                 existing = combined.get(incident_id)
 
                 if existing is None:
                     combined[incident_id] = record
+
                 else:
                     old_updated = parse_datetime(
                         existing.get("last_updated")
                     )
+
                     new_updated = parse_datetime(
                         record.get("last_updated")
                     )
@@ -138,14 +148,18 @@ def fetch_records():
 
 
 # ============================================================
-# TRANSFORM
+# TRANSFORM HELPERS
 # ============================================================
 
 def parse_datetime(value):
     """
-    Convert a date/time value to a Python datetime.
+    Convert a date/time value into a Python datetime.
 
     Returns None for missing or invalid values.
+
+    Timezone-aware timestamps are normalized to UTC and
+    converted to naive datetimes for compatibility with
+    PostgreSQL timestamp columns without time zone.
     """
 
     if value is None or value == "":
@@ -153,11 +167,13 @@ def parse_datetime(value):
 
     if isinstance(value, datetime):
         parsed = value
+
     else:
         try:
             parsed = datetime.fromisoformat(
                 str(value).replace("Z", "+00:00")
             )
+
         except (ValueError, TypeError):
             logger.warning(
                 "Invalid datetime value: %r",
@@ -165,34 +181,36 @@ def parse_datetime(value):
             )
             return None
 
-    # PostgreSQL timestamp columns commonly use timestamps
-    # without time zone in this project. Normalize aware
-    # values to UTC before removing the timezone information.
     if parsed.tzinfo is not None:
-        from datetime import timezone
-
-        parsed = parsed.astimezone(timezone.utc).replace(
-            tzinfo=None
-        )
+        parsed = parsed.astimezone(
+            timezone.utc
+        ).replace(tzinfo=None)
 
     return parsed
 
+
+# ============================================================
+# TRANSFORM
+# ============================================================
 
 def transform_records(records):
     """
     Validate and standardize API records for PostgreSQL.
 
     Records without an ID or valid incident date are skipped.
+    Duplicate IDs are resolved using the newest update time.
     """
 
     unique = {}
     invalid_count = 0
 
     for record in records:
-
         incident_id = record.get("id")
 
-        if incident_id is None or str(incident_id).strip() == "":
+        if (
+            incident_id is None
+            or str(incident_id).strip() == ""
+        ):
             invalid_count += 1
             continue
 
@@ -224,11 +242,11 @@ def transform_records(records):
             "last_updated": last_updated,
         }
 
-        # Protect against duplicate IDs within the extracted data.
         previous = unique.get(incident_id)
 
         if previous is None:
             unique[incident_id] = transformed
+
         else:
             previous_updated = previous["last_updated"]
 
@@ -257,7 +275,7 @@ def transform_records(records):
 
 
 # ============================================================
-# LOAD
+# LOAD - UPSERT SQL
 # ============================================================
 
 UPSERT_SQL = """
@@ -283,6 +301,7 @@ VALUES (
 )
 ON CONFLICT (incident_number)
 DO UPDATE SET
+
     incident_date = EXCLUDED.incident_date,
 
     offense = COALESCE(
@@ -321,12 +340,103 @@ WHERE
 """
 
 
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
+
+def get_database_connection():
+    """
+    Connect using the complete DATABASE_URL secret.
+
+    This function intentionally does not fall back to DB_HOST,
+    DB_PORT, DB_NAME, DB_USER, or DB_PASSWORD.
+
+    That prevents an incorrectly configured DB_HOST from
+    overriding the Render connection URL.
+    """
+
+    database_url = os.getenv("DATABASE_URL", "").strip()
+
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL is missing or empty. "
+            "Check GitHub repository Settings > Secrets and "
+            "variables > Actions."
+        )
+
+    # Validate the URL without logging its credentials.
+    try:
+        parsed = urlsplit(database_url)
+
+        hostname = parsed.hostname
+        scheme = parsed.scheme.lower()
+
+    except ValueError:
+        raise RuntimeError(
+            "DATABASE_URL is malformed. Copy the complete "
+            "External Database URL from Render and update "
+            "the GitHub DATABASE_URL secret."
+        ) from None
+
+    if scheme not in ("postgres", "postgresql"):
+        raise RuntimeError(
+            "DATABASE_URL must begin with postgres:// "
+            "or postgresql://."
+        )
+
+    if not hostname:
+        raise RuntimeError(
+            "DATABASE_URL does not contain a valid hostname. "
+            "Copy the complete External Database URL from Render."
+        )
+
+    # DNS hostnames cannot contain labels longer than 63
+    # characters, or exceed 253 characters overall.
+    hostname_labels = hostname.rstrip(".").split(".")
+
+    if (
+        len(hostname) > 253
+        or any(len(label) > 63 for label in hostname_labels)
+    ):
+        raise RuntimeError(
+            "The hostname inside DATABASE_URL is invalid or "
+            "too long. The secret may contain an incorrect value. "
+            "Replace it with the complete External Database URL "
+            "copied from Render. Do not use the internal hostname "
+            "or paste the URL into DB_HOST."
+        )
+
+    logger.info(
+        "DATABASE_URL validated. Connecting to PostgreSQL with SSL..."
+    )
+
+    try:
+        return psycopg.connect(
+            database_url,
+            sslmode="require",
+            connect_timeout=20,
+        )
+
+    except psycopg.Error:
+        # Do not print the URL because it contains credentials.
+        logger.error(
+            "PostgreSQL connection failed. Check the Render "
+            "database status, External Database URL, credentials, "
+            "and GitHub DATABASE_URL secret."
+        )
+        raise
+
+
+# ============================================================
+# LOAD
+# ============================================================
+
 def load_records(records):
     """
     Insert new records and update eligible existing records.
 
+    The pipeline does not drop or truncate the table.
     Existing records from another source are not overwritten.
-    The function never drops or truncates the table.
     """
 
     if not records:
@@ -339,10 +449,9 @@ def load_records(records):
         "Connecting to PostgreSQL..."
     )
 
-    with psycopg.connect(
-    **DB_CONFIG,
-    sslmode="require" if os.getenv("DB_HOST", "localhost") != "localhost" else "prefer"
-    ) as conn:
+    # The connection context commits on success, rolls back
+    # on error, and closes the connection on exit.
+    with get_database_connection() as conn:
 
         with conn.cursor() as cur:
 
@@ -396,13 +505,15 @@ def load_records(records):
 # ============================================================
 
 def main():
-
     logger.info("=" * 60)
     logger.info("CAMBRIDGE CRIME ETL PIPELINE STARTED")
     logger.info("=" * 60)
 
     try:
+        # ----------------------------------------------------
         # EXTRACT
+        # ----------------------------------------------------
+
         records = fetch_records()
 
         if not records:
@@ -411,7 +522,10 @@ def main():
                 "The database was not changed."
             )
 
+        # ----------------------------------------------------
         # TRANSFORM
+        # ----------------------------------------------------
+
         clean_records = transform_records(records)
 
         if not clean_records:
@@ -420,7 +534,10 @@ def main():
                 "The database was not changed."
             )
 
+        # ----------------------------------------------------
         # LOAD
+        # ----------------------------------------------------
+
         load_records(clean_records)
 
         logger.info("=" * 60)
