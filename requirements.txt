@@ -1,2 +1,3 @@
 requests==2.34.2
 prefect==3.8.8
+psycopg[binary]

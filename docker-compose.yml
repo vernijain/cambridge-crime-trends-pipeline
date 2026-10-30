@@ -27,6 +27,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+  etl:
+    build: .
+    container_name: crime_etl
+    env_file:
+      - .env
+    restart: "no"
+    command: ["python", "-u", "etl.py"]
 
 volumes:
   postgres_data:
