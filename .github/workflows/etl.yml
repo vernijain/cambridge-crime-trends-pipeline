@@ -1,9 +1,10 @@
-
 name: Cambridge Crime ETL
 
 on:
   workflow_dispatch:
+
   schedule:
+    # Runs daily at 08:00 AM India Standard Time (IST).
     - cron: "30 2 * * *"
 
 permissions:
@@ -11,46 +12,89 @@ permissions:
 
 jobs:
   run-etl:
-    runs-on: ubuntu-latest
+    name: Run Cambridge Crime ETL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     env:
-      DB_HOST: ${{ secrets.DB_HOST }}
-      DB_PORT: ${{ secrets.DB_PORT }}
-      DB_NAME: ${{ secrets.DB_NAME }}
-      DB_USER: ${{ secrets.DB_USER }}
-      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
+    steps:
+      # Step 1: Download repository code.
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # Step 2: Configure Python.
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
+      # Step 3: Check project requirements.
       - name: Verify requirements file
         run: |
           python --version
           python -m pip --version
+
+          if [ ! -f requirements.txt ]; then
+            echo "ERROR: requirements.txt was not found."
+            exit 1
+          fi
+
           cat requirements.txt
 
-      - name: Install Psycopg
+      # Step 4: Install dependencies.
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --no-cache-dir "psycopg[binary]"
-          python -m pip show psycopg
+          python -m pip install -r requirements.txt
+          python -m pip install --no-cache-dir "psycopg[binary]" requests python-dotenv
 
-      - name: Verify Psycopg import
+      # Step 5: Verify Psycopg installation.
+      - name: Verify Psycopg
         run: |
-          python -c "import sys, psycopg; print('Python:', sys.executable); print('Psycopg version:', psycopg.__version__)"
+          python -c "import sys, psycopg, requests; print('Python:', sys.executable); print('Psycopg:', psycopg.__version__); print('Requests:', requests.__version__)"
 
-      - name: Install remaining requirements
-        run: python -m pip install -r requirements.txt
+      # Step 6: Check Python syntax.
+      - name: Check ETL Python syntax
+        run: |
+          python -m py_compile etl.py
 
-      - name: Verify Psycopg again
-        run: python -c "import psycopg; print('Psycopg is available')"
+      # Step 7: Validate the database URL without printing credentials.
+      - name: Validate database configuration
+        run: |
+          python - <<'PY'
+          import os
+          from urllib.parse import urlsplit
 
+          database_url = os.environ.get("DATABASE_URL", "").strip()
+
+          if not database_url:
+              raise SystemExit(
+                  "ERROR: DATABASE_URL secret is missing."
+              )
+
+          try:
+              parsed = urlsplit(database_url)
+              hostname = parsed.hostname
+          except ValueError:
+              raise SystemExit(
+                  "ERROR: DATABASE_URL is malformed."
+              ) from None
+
+          if parsed.scheme not in ("postgres", "postgresql"):
+              raise SystemExit(
+                  "ERROR: DATABASE_URL must be a PostgreSQL URL."
+              )
+
+          if not hostname:
+              raise SystemExit(
+                  "ERROR: DATABASE_URL has no valid hostname."
+              )
+
+          print("DATABASE_URL format validation passed.")
+          PY
+
+      # Step 8: Run the ETL pipeline.
       - name: Run Cambridge Crime ETL
         run: python -u etl.py
-
