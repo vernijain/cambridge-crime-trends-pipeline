@@ -33,9 +33,7 @@ logger = logging.getLogger(__name__)
 
 API_URL = "https://data.cambridgema.gov/resource/3gki-wyrb.json"
 
-# Maximum records requested per API query.
 API_LIMIT = 5000
-
 API_TIMEOUT = 30
 
 
@@ -148,18 +146,16 @@ def fetch_records():
 
 
 # ============================================================
-# TRANSFORM HELPERS
+# DATETIME HELPER
 # ============================================================
 
 def parse_datetime(value):
     """
     Convert a date/time value into a Python datetime.
 
-    Returns None for missing or invalid values.
-
+    Invalid or missing values return None.
     Timezone-aware timestamps are normalized to UTC and
-    converted to naive datetimes for compatibility with
-    PostgreSQL timestamp columns without time zone.
+    converted to naive datetimes for PostgreSQL compatibility.
     """
 
     if value is None or value == "":
@@ -274,6 +270,90 @@ def transform_records(records):
     return clean_records
 
 
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
+
+def get_database_connection():
+    """
+    Connect to Render PostgreSQL using DATABASE_URL.
+
+    Do not use DB_HOST as a fallback. DATABASE_URL must contain
+    the complete PostgreSQL connection URL.
+    """
+
+    database_url = os.getenv(
+        "DATABASE_URL",
+        "",
+    ).strip()
+
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL is missing or empty. "
+            "Check GitHub repository Settings > Secrets and "
+            "variables > Actions."
+        )
+
+    try:
+        parsed = urlsplit(database_url)
+
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+
+    except ValueError:
+        raise RuntimeError(
+            "DATABASE_URL is malformed. Copy the complete "
+            "External Database URL from Render."
+        ) from None
+
+    if scheme not in ("postgres", "postgresql"):
+        raise RuntimeError(
+            "DATABASE_URL must begin with postgres:// "
+            "or postgresql://."
+        )
+
+    if not hostname:
+        raise RuntimeError(
+            "DATABASE_URL does not contain a valid hostname."
+        )
+
+    hostname_labels = hostname.rstrip(".").split(".")
+
+    if (
+        len(hostname) > 253
+        or any(len(label) > 63 for label in hostname_labels)
+    ):
+        raise RuntimeError(
+            "The hostname in DATABASE_URL is invalid or too long."
+        )
+
+    logger.info(
+        "DATABASE_URL validated. Connecting to PostgreSQL with SSL..."
+    )
+
+    try:
+        connection = psycopg.connect(
+            database_url,
+            sslmode="require",
+            connect_timeout=20,
+        )
+
+        logger.info("PostgreSQL connection established.")
+
+        return connection
+
+    except psycopg.Error:
+        logger.error(
+            "PostgreSQL connection failed. Check the Render "
+            "database status, credentials, and DATABASE_URL secret."
+        )
+        raise
+
+
+# ============================================================
+# CREATE DATABASE TABLE
+# ============================================================
+
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS crime_records (
     incident_number TEXT PRIMARY KEY,
@@ -284,10 +364,28 @@ CREATE TABLE IF NOT EXISTS crime_records (
     source TEXT,
     description TEXT,
     last_updated TIMESTAMP WITHOUT TIME ZONE
-)
+);
 """
 
 
+def create_table(conn):
+    """
+    Create crime_records if it does not already exist.
+
+    The primary key supports ON CONFLICT in the UPSERT statement.
+    """
+
+    logger.info("Checking whether crime_records exists...")
+
+    with conn.cursor() as cur:
+        cur.execute(CREATE_TABLE_SQL)
+
+    logger.info("crime_records table is ready.")
+
+
+# ============================================================
+# UPSERT SQL
+# ============================================================
 
 UPSERT_SQL = """
 INSERT INTO crime_records (
@@ -347,95 +445,8 @@ WHERE
             crime_records.last_updated IS NULL
             OR EXCLUDED.last_updated >= crime_records.last_updated
         )
-    )
+    );
 """
-
-
-# ============================================================
-# DATABASE CONNECTION
-# ============================================================
-
-def get_database_connection():
-    """
-    Connect using the complete DATABASE_URL secret.
-
-    This function intentionally does not fall back to DB_HOST,
-    DB_PORT, DB_NAME, DB_USER, or DB_PASSWORD.
-
-    That prevents an incorrectly configured DB_HOST from
-    overriding the Render connection URL.
-    """
-
-    database_url = os.getenv("DATABASE_URL", "").strip()
-
-    if not database_url:
-        raise RuntimeError(
-            "DATABASE_URL is missing or empty. "
-            "Check GitHub repository Settings > Secrets and "
-            "variables > Actions."
-        )
-
-    # Validate the URL without logging its credentials.
-    try:
-        parsed = urlsplit(database_url)
-
-        hostname = parsed.hostname
-        scheme = parsed.scheme.lower()
-
-    except ValueError:
-        raise RuntimeError(
-            "DATABASE_URL is malformed. Copy the complete "
-            "External Database URL from Render and update "
-            "the GitHub DATABASE_URL secret."
-        ) from None
-
-    if scheme not in ("postgres", "postgresql"):
-        raise RuntimeError(
-            "DATABASE_URL must begin with postgres:// "
-            "or postgresql://."
-        )
-
-    if not hostname:
-        raise RuntimeError(
-            "DATABASE_URL does not contain a valid hostname. "
-            "Copy the complete External Database URL from Render."
-        )
-
-    # DNS hostnames cannot contain labels longer than 63
-    # characters, or exceed 253 characters overall.
-    hostname_labels = hostname.rstrip(".").split(".")
-
-    if (
-        len(hostname) > 253
-        or any(len(label) > 63 for label in hostname_labels)
-    ):
-        raise RuntimeError(
-            "The hostname inside DATABASE_URL is invalid or "
-            "too long. The secret may contain an incorrect value. "
-            "Replace it with the complete External Database URL "
-            "copied from Render. Do not use the internal hostname "
-            "or paste the URL into DB_HOST."
-        )
-
-    logger.info(
-        "DATABASE_URL validated. Connecting to PostgreSQL with SSL..."
-    )
-
-    try:
-        return psycopg.connect(
-            database_url,
-            sslmode="require",
-            connect_timeout=20,
-        )
-
-    except psycopg.Error:
-        # Do not print the URL because it contains credentials.
-        logger.error(
-            "PostgreSQL connection failed. Check the Render "
-            "database status, External Database URL, credentials, "
-            "and GitHub DATABASE_URL secret."
-        )
-        raise
 
 
 # ============================================================
@@ -444,10 +455,10 @@ def get_database_connection():
 
 def load_records(records):
     """
-    Insert new records and update eligible existing records.
+    Create the destination table and load records.
 
-    The pipeline does not drop or truncate the table.
     Existing records from another source are not overwritten.
+    The transaction commits on success and rolls back on error.
     """
 
     if not records:
@@ -457,17 +468,20 @@ def load_records(records):
         return
 
     logger.info(
-        "Connecting to PostgreSQL..."
+        "Connecting to PostgreSQL for data loading..."
     )
 
-    # The connection context commits on success, rolls back
-    # on error, and closes the connection on exit.
     with get_database_connection() as conn:
 
+        # Create the table before attempting any INSERT.
+        create_table(conn)
+
         with conn.cursor() as cur:
-            # Create the destination table if this is a fresh Render database.
-            # The primary key on incident_number supports ON CONFLICT in UPSERT_SQL.
-            cur.execute(CREATE_TABLE_SQL)
+
+            logger.info(
+                "Loading %s records...",
+                len(records),
+            )
 
             cur.executemany(
                 UPSERT_SQL,
@@ -489,12 +503,13 @@ def load_records(records):
 
             result = cur.fetchone()
 
+    # Exiting the connection context commits the transaction.
     logger.info(
         "Database transaction completed successfully."
     )
 
     logger.info(
-        "Total police records: %s",
+        "Total Cambridge police records: %s",
         result[0],
     )
 
