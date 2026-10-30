@@ -274,14 +274,6 @@ def transform_records(records):
     return clean_records
 
 
-# ============================================================
-<<<<<<< HEAD
-# LOAD - TABLE SETUP AND UPSERT SQL
-=======
-# LOAD - UPSERT SQL
->>>>>>> 1a720e824ff5486e09a427b44e64c5e965fa26fa
-# ============================================================
-
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS crime_records (
     incident_number TEXT PRIMARY KEY,
