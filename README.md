@@ -99,6 +99,47 @@ _Add a screenshot of your dashboard here once it is ready._
 ## Author
 
 Verni Jain
+## Running the Project with Docker
+
+### Prerequisites
+- Docker Desktop
+- Git
+- Access to the Render PostgreSQL database
+
+### Setup Instructions
+
+1. Clone the repository:
+
+   `git clone https://github.com/vernijain/cambridge-crime-trends-pipeline.git`
+
+2. Open the project directory:
+
+   `cd cambridge-crime-trends-pipeline`
+
+3. Create a `.env` file in the project directory and add your Render database connection:
+
+   `DATABASE_URL=your_render_database_url`
+
+4. Build the ETL image:
+
+   `docker compose build etl`
+
+5. Run the ETL pipeline:
+
+   `docker compose run --rm etl`
+
+### Start the Dashboard Services
+
+Start PostgreSQL and Metabase:
+
+`docker compose up -d postgres metabase`
+
+Open Metabase at `http://localhost:3000`.
+
+### Security
+- Never upload `.env` or database passwords to GitHub.
+- The ETL pipeline uses `DATABASE_URL` to connect to Render PostgreSQL.
+- Running the ETL pipeline may modify the remote database.
 
 ## License
 
